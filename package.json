@@ -1,0 +1,8 @@
+{
+  "name": "@ciperx/charter-verifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static page and ES module that verify a Founding Charter EAS attestation against its IPFS texts",
+  "scripts": {"test": "node --test test/*.test.js"}
+}

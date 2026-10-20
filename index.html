@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charter attestation verifier</title>
+<style>
+  :root { color-scheme: dark; --ink: #e8e8ea; --dim: #9a9aa2; --line: #2a2a30; --ok: #4ade80; --bad: #f87171; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 16px 48px; background: #101014; color: var(--ink);
+         font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { color: var(--dim); margin: 0 0 20px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin: 14px 0 6px; }
+  input, select, button { width: 100%; max-width: 100%; padding: 11px 12px; font: inherit; color: var(--ink);
+         background: #17171c; border: 1px solid var(--line); border-radius: 8px; }
+  input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; }
+  button { margin-top: 18px; background: #2b6cf6; border-color: #2b6cf6; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  section { margin-top: 24px; border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: #14141a; }
+  section h2 { font-size: 16px; margin: 0 0 10px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row .name { font-weight: 600; }
+  .row .digest { font-family: ui-monospace, monospace; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
+  .verdict { font-size: 13px; font-weight: 700; }
+  .verdict.ok { color: var(--ok); }
+  .verdict.bad { color: var(--bad); }
+  .banner { margin-top: 16px; padding: 12px 14px; border-radius: 8px; font-weight: 600; }
+  .banner.ok { background: #0f291b; color: var(--ok); border: 1px solid #1d5133; }
+  .banner.bad { background: #2a1315; color: var(--bad); border: 1px solid #5b2226; }
+  .meta { font-size: 13px; color: var(--dim); overflow-wrap: anywhere; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Charter attestation verifier</h1>
+  <p class="lead">Reads an EAS attestation on Base or Base Sepolia, fetches every text from IPFS and recomputes its sha256.</p>
+
+  <form id="form">
+    <label for="uid">Attestation UID</label>
+    <input id="uid" name="uid" placeholder="0x..." autocomplete="off" spellcheck="false" required>
+
+    <label for="network">Network</label>
+    <select id="network" name="network">
+      <option value="base">Base (8453)</option>
+      <option value="base-sepolia" selected>Base Sepolia (84532)</option>
+    </select>
+
+    <label for="gateway">IPFS gateway</label>
+    <input id="gateway" name="gateway" value="https://ipfs.io/ipfs/" autocomplete="off" spellcheck="false">
+
+    <button id="go" type="submit">Verify</button>
+  </form>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <section id="attestation" class="hidden">
+    <h2>Attestation</h2>
+    <div id="attestation-body" class="meta"></div>
+  </section>
+
+  <section id="texts" class="hidden">
+    <h2>Texts</h2>
+    <div id="texts-body"></div>
+  </section>
+</main>
+<script type="module">
+import { verifyCharter, NETWORKS } from "./verifier.js";
+
+const form = document.getElementById("form");
+const banner = document.getElementById("banner");
+const attestationBox = document.getElementById("attestation");
+const attestationBody = document.getElementById("attestation-body");
+const textsBox = document.getElementById("texts");
+const textsBody = document.getElementById("texts-body");
+const button = document.getElementById("go");
+
+function rpcFor(url) {
+  return async (method, params) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    const body = await response.json();
+    if (body.error) {
+      const error = new Error(body.error.message || "the RPC answered with an error");
+      error.code = body.error.code;
+      throw error;
+    }
+    return body.result;
+  };
+}
+
+function ipfsFor(base) {
+  const prefix = base.endsWith("/") ? base : `${base}/`;
+  return async (cid) => {
+    const response = await fetch(`${prefix}${cid}`, { redirect: "follow" });
+    if (!response.ok) throw new Error(`the gateway answered ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+}
+
+function show(kind, text) {
+  banner.className = `banner ${kind}`;
+  banner.textContent = text;
+  banner.classList.remove("hidden");
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const uid = document.getElementById("uid").value.trim();
+  const network = document.getElementById("network").value;
+  const gateway = document.getElementById("gateway").value.trim();
+  button.disabled = true;
+  attestationBox.classList.add("hidden");
+  textsBox.classList.add("hidden");
+  try {
+    const report = await verifyCharter({
+      uid,
+      network,
+      rpc: rpcFor(NETWORKS[network].rpc),
+      ipfs: ipfsFor(gateway),
+    });
+
+    if (report.attestation) {
+      attestationBody.innerHTML = "";
+      for (const [label, value] of [
+        ["UID", report.attestation.uid],
+        ["Attester", report.attestation.attester],
+        ["Time", new Date(report.attestation.time * 1000).toISOString()],
+        ["Revoked", report.attestation.revoked ? "yes" : "no"],
+      ]) {
+        const line = document.createElement("div");
+        line.textContent = `${label}: ${value}`;
+        attestationBody.appendChild(line);
+      }
+      attestationBox.classList.remove("hidden");
+    }
+
+    textsBody.innerHTML = "";
+    for (const text of report.texts) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const left = document.createElement("div");
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = text.name;
+      const cid = document.createElement("div");
+      cid.className = "digest";
+      cid.textContent = text.cid;
+      left.append(name, cid);
+      const right = document.createElement("div");
+      const verdict = document.createElement("div");
+      verdict.className = `verdict ${text.match ? "ok" : "bad"}`;
+      verdict.textContent = text.match ? "match" : text.error ? "cannot be read" : "mismatch";
+      right.appendChild(verdict);
+      if (!text.match) {
+        const expected = document.createElement("div");
+        expected.className = "digest";
+        expected.textContent = `expected ${text.expected}`;
+        const actual = document.createElement("div");
+        actual.className = "digest";
+        actual.textContent = text.actual ? `actual ${text.actual}` : text.error;
+        right.append(expected, actual);
+      }
+      row.append(left, right);
+      textsBody.appendChild(row);
+    }
+    if (report.texts.length > 0) textsBox.classList.remove("hidden");
+
+    if (report.ok) show("ok", "Every text matches the attestation");
+    else show("bad", report.reason || "the attestation could not be verified");
+  } catch (error) {
+    show("bad", `the report failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
