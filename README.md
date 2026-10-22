@@ -1,76 +1,75 @@
 # charter-verifier
 
-A static page that proves an on chain Founding Charter matches its published texts.
+Prove that the Founding Charter attested on chain matches its published texts.
 
-Paste an EAS attestation UID, pick Base or Base Sepolia, press Verify. The page reads the
-attestation, fetches every text from IPFS, recomputes its sha256 and shows match or mismatch
-per text. No backend, no key, no wallet.
+Give it an [EAS](https://attest.sh) attestation UID on **Base** (8453) or **Base Sepolia** (84532).
+It reads the attestation from the EAS contract at `0x4200000000000000000000000000000000000021`,
+fetches every text from IPFS, recomputes its sha256 and shows **match or mismatch per text**.
 
-## The page
+Schema of the attestation data:
 
-Open `index.html` from any static host, or serve the folder:
-
-```sh
-python3 -m http.server 8080
+```
+string version,string date,string[] names,bytes32[] digests,string[] cids
 ```
 
-Fields:
+`names`, `digests` and `cids` are parallel arrays; each digest is the sha256 of the exact bytes
+stored under its CID.
 
-- Attestation UID, 32 bytes of hex.
-- Network, Base (8453) or Base Sepolia (84532). This picks the chain and the public RPC,
-  `https://mainnet.base.org` or `https://sepolia.base.org`.
-- IPFS gateway, editable, default `https://ipfs.io/ipfs/`.
+## Interface
 
-The attestation contract is the EAS predeploy at
-`0x4200000000000000000000000000000000000021` on both networks.
+Static HTML + CSS + JS. **No backend, no build step, no dependencies.**
 
-## The module
+- `index.html` — the page (open it directly, or serve the folder).
+- `verifier.js` — ES module with the logic; runs in the browser **and** in Node 20+.
 
-`verifier.js` is an ES module with no dependency. It runs in the browser and in Node 20.
+Exports:
 
 ```js
-import { verifyCharter, decodeCharterData, NETWORKS } from "./verifier.js";
-
-const report = await verifyCharter({ uid, network: "base-sepolia", rpc, ipfs });
+decodeCharterData(dataHex) // -> {version, date, names, digests, cids}
+decodeAttestation(resultHex) // -> Attestation | null  (handles Base's pointer-shaped result)
+encodeGetAttestation(uid) // -> eth_call data with selector 0xa3112a64
+verifyCharter({uid, network, rpc, ipfs}) // -> {ok, reason?, attestation, texts}
+sha256Hex(bytes) // -> hex digest
+jsonRpc(url) / ipfsGateway(url) / PUBLIC_RPC // ready-made fetch based transports
 ```
 
-- `decodeCharterData(dataHex)` reads the attestation data, ABI encoded as
-  `string version,string date,string[] names,bytes32[] digests,string[] cids`, and returns
-  `{version, date, names, digests, cids}` with digests as `0x` and 64 lowercase hex.
-- `verifyCharter({uid, network, rpc, ipfs})` returns
-  `{ok, reason?, attestation: {uid, attester, time, revoked}, texts: [{name, cid, expected, actual, match, error?}]}`.
-  `rpc(method, params)` sends one JSON-RPC call, `ipfs(cid)` returns the bytes of one text.
-  `ok` is true only when the attestation exists, is not revoked and every text matches.
-- `decodeAttestation(dataHex)` is exported too, as the struct reader behind the call.
-- The module never throws for a missing attestation, a revoked one, a reverting RPC or a text
-  it cannot fetch. Each case is a `reason` and, where it makes sense, an entry with `error`.
+`verifyCharter` never throws for a missing attestation, a revoked one, or a text it cannot fetch —
+it reports them. `ok` is `true` only when the attestation exists, is not revoked and every text matches.
+
+Addresses and the digest are compared lowercase; nothing here needs a key or a wallet connection.
+
+## Use it in Node
+
+```js
+import { verifyCharter, jsonRpc, ipfsGateway, PUBLIC_RPC } from './verifier.js';
+
+const report = await verifyCharter({
+  uid: '0x…',                       // 32 byte attestation uid
+  network: 'base',                  // or 'base-sepolia'
+  rpc: jsonRpc(PUBLIC_RPC.base),    // any JSON-RPC endpoint
+  ipfs: ipfsGateway('https://ipfs.io/ipfs/'),
+});
+
+console.log(report.ok, report.reason ?? '', report.texts);
+```
 
 ## Tests
 
-```sh
-npm test
+```bash
+node --test test/verifier.test.mjs
 ```
 
-Six tests, named after the acceptance item they prove:
+12 tests, no network: a synthetic ABI encoder builds charter data and an EAS answer, then
+`verifyCharter` is driven through a fake `rpc` and a fake `ipfs` — matching attestation, one
+tampered text, one unreachable text, missing attestation, revoked attestation, invalid input,
+and the pointer-shaped result Base actually returns (checked against
+`eth_call` on `https://mainnet.base.org`).
 
-- A1 `decodeCharterData` reads back what the schema encodes.
-- A2 a matching attestation shows a match for each text and `ok` true.
-- A3 a tampered text shows a mismatch for that text only, with both digests, and `ok` false.
-- A4 an unknown UID, a revoked attestation, a reverting RPC and a text that cannot be fetched
-  are reported plainly and never thrown.
-- A5 both networks work, and the call goes to the EAS predeploy with the right selector and uid.
-- A6 the page is mobile friendly at 360 px and a recorded Sepolia attestation verifies end to end.
+## Notes from the live chain
 
-`fixtures/charter.json` holds an ABI encoded EAS attestation with three texts, its digests and
-the exact bytes behind each CID, made by `scripts/make-fixture.py`. The tests are offline: they
-inject `rpc` and `ipfs`.
+- `getAttestation(bytes32)` selector is `0xa3112a64`.
+- Base's EAS answers with the struct behind a leading offset word (`0x20…`); both that and the
+  inline ABI shape decode.
+- A UID with no attestation returns a zeroed struct — reported as `no attestation with that uid`.
 
-## The rehearsal UID
-
-Kognai publishes a Sepolia rehearsal UID with the bundle. Paste it into the page with Base
-Sepolia selected; the page reads it from the live chain and the live gateway. The recorded
-fixture in this repository is a second, offline case, so the tests stay deterministic.
-
-## House rules
-
-Latin digits, no long dashes in any text people see, no secrets in the code or the logs.
+MIT.

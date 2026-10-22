@@ -1,191 +1,281 @@
-// Charter attestation verifier: decode an EAS attestation on Base or Base Sepolia, then
-// recompute the sha256 of every text it names. No dependency, runs in the browser and in Node 20.
+// verifier.js — Founding Charter attestation verifier (EAS on Base / Base Sepolia)
+// No dependencies. Runs in the browser (ES module) and in Node 20+.
 
-export const EAS = "0x4200000000000000000000000000000000000021";
-export const NETWORKS = {
-  base: { chainId: 8453, rpc: "https://mainnet.base.org" },
-  "base-sepolia": { chainId: 84532, rpc: "https://sepolia.base.org" },
-};
-export const SCHEMA = "string version,string date,string[] names,bytes32[] digests,string[] cids";
+export const EAS_ADDRESS = '0x4200000000000000000000000000000000000021';
+export const EAS_CHAIN = { base: 8453, 'base-sepolia': 84532 };
+export const CHARTER_SCHEMA =
+  'string version,string date,string[] names,bytes32[] digests,string[] cids';
+// keccak256("getAttestation(bytes32)")[:4]
+export const GET_ATTESTATION_SELECTOR = '0xa3112a64';
 
-const SELECTOR_GET_ATTESTATION = "0xa3112a64";
-const ZERO_UID = "0x" + "00".repeat(32);
+/* ------------------------------- hex helpers ------------------------------ */
 
-function bytesOf(hex) {
-  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-  if (clean.length % 2 !== 0) throw new Error("odd length hex");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+export function strip0x(h) {
+  return typeof h === 'string' && h.startsWith('0x') ? h.slice(2) : String(h || '');
+}
+
+export function hexToBytes(h) {
+  const s = strip0x(h);
+  if (s.length % 2 !== 0) throw new Error('hex string has an odd length');
+  if (!/^[0-9a-fA-F]*$/.test(s)) throw new Error('not a hex string');
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
   return out;
 }
 
-function hexOf(bytes) {
-  let out = "";
-  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
-  return out;
+export function bytesToHex(bytes) {
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
 }
 
-function word(bytes, index) {
-  const start = index * 32;
-  if (start + 32 > bytes.length) throw new Error("read past the end of the data");
-  let value = 0n;
-  for (let i = 0; i < 32; i += 1) value = (value << 8n) | BigInt(bytes[start + i]);
-  return value;
+function word(hex, index) {
+  const start = index * 64;
+  if (hex.length < start + 64) throw new Error(`ABI data is too short for word ${index}`);
+  return hex.slice(start, start + 64);
 }
 
-function sliceAt(bytes, offset, length) {
-  if (offset + length > bytes.length) throw new Error("read past the end of the data");
-  return bytes.slice(offset, offset + length);
+function wordToNumber(w) {
+  return Number(BigInt('0x' + w));
 }
 
-function decodeString(bytes, offset) {
-  const length = Number(word(bytes, offset / 32));
-  return new TextDecoder().decode(sliceAt(bytes, offset + 32, length));
+function decodeStringAt(hex, byteOffset) {
+  const base = byteOffset * 2;
+  const len = wordToNumber(hex.slice(base, base + 64));
+  const body = hex.slice(base + 64, base + 64 + len * 2);
+  if (body.length !== len * 2) throw new Error('ABI string runs past the end of the data');
+  return new TextDecoder().decode(hexToBytes(body));
 }
 
-function decodeStringArray(bytes, offset) {
-  const count = Number(word(bytes, offset / 32));
-  const values = [];
-  for (let i = 0; i < count; i += 1) {
-    const relative = Number(word(bytes, (offset + 32 + i * 32) / 32));
-    values.push(decodeString(bytes, offset + 32 + relative));
-  }
-  return values;
-}
+/* --------------------------- Charter data decoding ------------------------ */
 
-function decodeBytes32Array(bytes, offset) {
-  const count = Number(word(bytes, offset / 32));
-  const values = [];
-  for (let i = 0; i < count; i += 1) {
-    values.push("0x" + hexOf(sliceAt(bytes, offset + 32 + i * 32, 32)));
-  }
-  return values;
-}
-
-function decodeBytes(bytes, offset) {
-  const length = Number(word(bytes, offset / 32));
-  return sliceAt(bytes, offset + 32, length);
-}
-
-// string version,string date,string[] names,bytes32[] digests,string[] cids
+/**
+ * Decode the `data` field of a Founding Charter attestation.
+ * Schema: string version,string date,string[] names,bytes32[] digests,string[] cids
+ */
 export function decodeCharterData(dataHex) {
-  const bytes = bytesOf(dataHex);
-  const heads = [0, 1, 2, 3, 4].map((index) => Number(word(bytes, index)));
-  const version = decodeString(bytes, heads[0]);
-  const date = decodeString(bytes, heads[1]);
-  const names = decodeStringArray(bytes, heads[2]);
-  const digests = decodeBytes32Array(bytes, heads[3]).map((digest) => digest.toLowerCase());
-  const cids = decodeStringArray(bytes, heads[4]);
+  const hex = strip0x(dataHex).toLowerCase();
+  if (!hex) throw new Error('charter data is empty');
+  const oVersion = wordToNumber(word(hex, 0));
+  const oDate = wordToNumber(word(hex, 1));
+  const oNames = wordToNumber(word(hex, 2));
+  const oDigests = wordToNumber(word(hex, 3));
+  const oCids = wordToNumber(word(hex, 4));
+
+  const version = decodeStringAt(hex, oVersion);
+  const date = decodeStringAt(hex, oDate);
+  const names = decodeStringArray(hex, oNames);
+  const digests = decodeBytes32Array(hex, oDigests).map((d) => '0x' + d);
+  const cids = decodeStringArray(hex, oCids);
+
   if (names.length !== digests.length || names.length !== cids.length) {
-    throw new Error("names, digests and cids are not parallel");
+    throw new Error(
+      `charter arrays are not parallel: ${names.length} names, ${digests.length} digests, ${cids.length} cids`
+    );
   }
   return { version, date, names, digests, cids };
 }
 
-// The EAS Attestation struct returned by getAttestation(bytes32).
-export function decodeAttestation(dataHex) {
-  const bytes = bytesOf(dataHex);
-  const uid = "0x" + hexOf(sliceAt(bytes, 0, 32));
-  const schema = "0x" + hexOf(sliceAt(bytes, 32, 32));
-  const time = Number(word(bytes, 2));
-  const expirationTime = Number(word(bytes, 3));
-  const revocationTime = Number(word(bytes, 4));
-  const refUID = "0x" + hexOf(sliceAt(bytes, 5 * 32, 32));
-  const recipient = "0x" + hexOf(sliceAt(bytes, 6 * 32, 32)).slice(24);
-  const attester = "0x" + hexOf(sliceAt(bytes, 7 * 32, 32)).slice(24);
-  const revocable = word(bytes, 8) !== 0n;
-  const dataOffset = Number(word(bytes, 9));
-  const data = "0x" + hexOf(decodeBytes(bytes, dataOffset));
-  return { uid, schema, time, expirationTime, revocationTime, refUID, recipient, attester, revocable, data };
+function decodeStringArray(hex, byteOffset) {
+  const base = byteOffset * 2;
+  const count = wordToNumber(hex.slice(base, base + 64));
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const rel = wordToNumber(hex.slice(base + 64 + i * 64, base + 128 + i * 64));
+    // element offsets are relative to the start of the array payload (after count)
+    out.push(decodeStringAt(hex, byteOffset + 32 + rel));
+  }
+  return out;
 }
 
-async function sha256(bytes) {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return "0x" + hexOf(new Uint8Array(digest));
+function decodeBytes32Array(hex, byteOffset) {
+  const base = byteOffset * 2;
+  const count = wordToNumber(hex.slice(base, base + 64));
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(hex.slice(base + 64 + i * 64, base + 128 + i * 64));
+  }
+  return out;
 }
 
-function toBytes(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (typeof value === "string") return bytesOf(value);
-  throw new Error("the text fetch did not return bytes");
+/* ---------------------------- attestation decoding ------------------------ */
+
+/** ABI-encode a getAttestation(bytes32) eth_call payload. */
+export function encodeGetAttestation(uid) {
+  const u = strip0x(uid).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(u)) throw new Error('uid must be 32 bytes of hex');
+  return GET_ATTESTATION_SELECTOR + u;
 }
 
-function padUid(uid) {
-  const clean = (uid || "").toLowerCase().replace(/^0x/, "");
-  if (!/^[0-9a-f]{64}$/.test(clean)) throw new Error("the uid must be 32 bytes of hex");
-  return clean;
+/**
+ * Decode the EAS Attestation struct returned by getAttestation:
+ * (bytes32 uid, bytes32 schema, uint64 time, uint64 expirationTime,
+ *  uint64 revocationTime, bytes32 refUID, address recipient, address attester,
+ *  bool revocable, bytes data)
+ *
+ * Base's EAS returns the struct behind a leading offset word (0x20…), so both
+ * shapes are accepted: inline, and pointer-to-struct.
+ */
+export function decodeAttestation(resultHex) {
+  const hex = strip0x(resultHex).toLowerCase();
+  if (!hex) return null;
+  const words = Math.floor(hex.length / 64);
+  if (words < 10) return null;
+
+  let baseWord = 0;
+  const first = Number(BigInt('0x' + hex.slice(0, 64)));
+  if (first !== 0 && first % 32 === 0 && first <= 1024 && words * 32 > first) {
+    baseWord = first / 32; // tuple is behind a pointer
+  }
+  if (words < baseWord + 10) return null;
+
+  const w = (i) => word(hex, baseWord + i);
+  const uid = '0x' + w(0);
+  if (/^0x0+$/.test(uid)) return null; // zeroed struct = no attestation
+  const schema = '0x' + w(1);
+  const time = wordToNumber(w(2));
+  const expirationTime = wordToNumber(w(3));
+  const revocationTime = wordToNumber(w(4));
+  const refUID = '0x' + w(5);
+  const recipient = '0x' + w(6).slice(24);
+  const attester = '0x' + w(7).slice(24);
+  const revocable = wordToNumber(w(8)) !== 0;
+  const oData = wordToNumber(w(9));
+  // data offset is relative to the start of the struct
+  const dataStart = (baseWord * 32 + oData) * 2;
+  if (dataStart + 64 > hex.length) return null;
+  const len = wordToNumber(hex.slice(dataStart, dataStart + 64));
+  const data = hex.slice(dataStart + 64, dataStart + 64 + len * 2);
+  return {
+    uid, schema, time, expirationTime, revocationTime, refUID,
+    recipient, attester, revocable,
+    revoked: revocationTime !== 0,
+    data: '0x' + data,
+  };
 }
 
+/* ------------------------------- hashing --------------------------------- */
+
+export async function sha256Hex(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (subtle) {
+    const digest = await subtle.digest('SHA-256', view);
+    return bytesToHex(new Uint8Array(digest));
+  }
+  const { createHash } = await import('node:crypto');
+  return createHash('sha256').update(view).digest('hex');
+}
+
+/* ------------------------------- verifier -------------------------------- */
+
+/**
+ * Verify that the on-chain charter attestation matches its published texts.
+ * @param {{uid:string, network:'base'|'base-sepolia', rpc:Function, ipfs:Function}} opts
+ *   rpc(method, params) -> Promise<result>; ipfs(cid) -> Promise<Uint8Array>
+ */
 export async function verifyCharter({ uid, network, rpc, ipfs }) {
-  const report = { ok: false, attestation: null, texts: [] };
-  const chain = NETWORKS[network] ? network : "base";
-  const registry = EAS;
+  const chainId = EAS_CHAIN[network];
+  if (!chainId) throw new Error(`unknown network "${network}" (expected base or base-sepolia)`);
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(uid || ''))) {
+    throw new Error('uid must be a 0x-prefixed 32 byte hex string');
+  }
+  if (typeof rpc !== 'function') throw new Error('rpc must be a function');
+  if (typeof ipfs !== 'function') throw new Error('ipfs must be a function');
 
-  let call;
-  try {
-    const padded = padUid(uid);
-    const result = await rpc("eth_call", [{ to: registry, data: SELECTOR_GET_ATTESTATION + padded }, "latest"]);
-    call = typeof result === "string" ? result : result?.data ?? "0x";
-  } catch (error) {
-    report.reason = `the RPC call failed: ${error?.message ?? error}`;
-    return report;
+  const result = await rpc('eth_call', [
+    { to: EAS_ADDRESS, data: encodeGetAttestation(uid) },
+    'latest',
+  ]);
+
+  const attestation = decodeAttestation(result);
+  if (!attestation) {
+    return { ok: false, reason: 'no attestation with that uid on this network', attestation: null, texts: [] };
   }
 
-  if (!call || call === "0x" || call.length < 2 + 32 * 10) {
-    report.reason = `no attestation with that uid on ${chain}`;
-    return report;
-  }
-
-  let attestation;
   let charter;
   try {
-    attestation = decodeAttestation(call);
-    if (attestation.uid === ZERO_UID) {
-      report.reason = `no attestation with that uid on ${chain}`;
-      return report;
-    }
     charter = decodeCharterData(attestation.data);
-  } catch (error) {
-    report.reason = `the attestation data could not be read: ${error?.message ?? error}`;
-    return report;
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `attestation data is not a charter: ${err.message}`,
+      attestation: pickAttestation(attestation),
+      texts: [],
+    };
   }
 
-  const revoked = attestation.revocationTime > 0;
-  report.attestation = {
-    uid: attestation.uid,
-    attester: attestation.attester,
-    time: attestation.time,
-    revoked,
-  };
-
-  for (let i = 0; i < charter.names.length; i += 1) {
+  const texts = [];
+  for (let i = 0; i < charter.names.length; i++) {
     const name = charter.names[i];
     const cid = charter.cids[i];
-    const expected = charter.digests[i];
-    const entry = { name, cid, expected, actual: null, match: false };
+    const expected = String(charter.digests[i]).toLowerCase();
     try {
-      const bytes = toBytes(await ipfs(cid));
-      entry.actual = await sha256(bytes);
-      entry.match = entry.actual === expected;
-    } catch (error) {
-      entry.error = `the text could not be read: ${error?.message ?? error}`;
+      const bytes = await ipfs(cid);
+      const actual = '0x' + (await sha256Hex(bytes));
+      texts.push({
+        name, cid, expected, actual,
+        match: actual === expected,
+        ...(actual === expected ? {} : { error: 'sha256 does not match the attested digest' }),
+      });
+    } catch (err) {
+      texts.push({
+        name, cid, expected, actual: null, match: false,
+        error: `text could not be fetched and hashed: ${err && err.message ? err.message : String(err)}`,
+      });
     }
-    report.texts.push(entry);
   }
 
-  if (revoked) {
-    report.reason = "the attestation was revoked";
-    return report;
+  const allMatch = texts.length > 0 && texts.every((t) => t.match);
+  if (attestation.revoked) {
+    return { ok: false, reason: 'attestation is revoked', attestation: pickAttestation(attestation), texts };
   }
-
-  const failed = report.texts.filter((text) => !text.match);
-  if (failed.length > 0) {
-    const names = failed.map((text) => text.name).join(", ");
-    report.reason = `the texts do not match the attestation: ${names}`;
-    return report;
+  if (!allMatch) {
+    const bad = texts.filter((t) => !t.match).map((t) => t.name);
+    return {
+      ok: false,
+      reason: `mismatch for: ${bad.join(', ') || 'no texts'}`,
+      attestation: pickAttestation(attestation),
+      texts,
+    };
   }
+  return { ok: true, attestation: pickAttestation(attestation), texts, version: charter.version, date: charter.date };
+}
 
-  report.ok = true;
-  return report;
+function pickAttestation(a) {
+  return {
+    uid: a.uid, attester: a.attester, time: a.time,
+    revoked: a.revoked, schema: a.schema, recipient: a.recipient,
+  };
+}
+
+/* ------------------------- ready-made transports ------------------------- */
+
+export const PUBLIC_RPC = {
+  base: 'https://mainnet.base.org',
+  'base-sepolia': 'https://sepolia.base.org',
+};
+
+export function jsonRpc(rpcUrl) {
+  return async function rpc(method, params) {
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    if (!res.ok) throw new Error(`RPC answered ${res.status}`);
+    const body = await res.json();
+    if (body.error) throw new Error(`RPC error: ${body.error.message || JSON.stringify(body.error)}`);
+    return body.result;
+  };
+}
+
+export function ipfsGateway(gateway) {
+  const base = String(gateway || 'https://ipfs.io/ipfs/').replace(/\/+$/, '/');
+  return async function ipfs(cid) {
+    const url = `${base}${cid}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`IPFS gateway answered ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  };
 }

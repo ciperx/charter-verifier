@@ -1,8 +1,16 @@
 {
-  "name": "@ciperx/charter-verifier",
+  "name": "charter-verifier",
   "version": "1.0.0",
-  "private": true,
+  "description": "Verify that the Founding Charter EAS attestation on Base matches its published IPFS texts",
   "type": "module",
-  "description": "Static page and ES module that verify a Founding Charter EAS attestation against its IPFS texts",
-  "scripts": {"test": "node --test test/*.test.js"}
+  "main": "verifier.js",
+  "exports": {
+    ".": "./verifier.js"
+  },
+  "files": ["verifier.js", "index.html"],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
 }
